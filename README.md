@@ -1,6 +1,6 @@
 # SmartPoint API
 
-Backend API for SmartPoint POS System
+Backend REST API for SmartPoint POS System
 
 ## Features
 
@@ -17,7 +17,7 @@ Backend API for SmartPoint POS System
 
 - Node.js
 - Express.js
-- MongoDB/Database
+- MongoDB (via Mongoose)
 
 ## Getting Started
 

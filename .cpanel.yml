@@ -1,0 +1,12 @@
+---
+# cPanel Git Deployment Configuration
+# This file enables automatic deployment when pushing to Git in cPanel
+
+deployment:
+  tasks:
+    - export DEPLOYPATH=/home/acehktik/smartpos-backend
+    - /bin/cp -R * $DEPLOYPATH
+    - cd $DEPLOYPATH
+    - npm install --production
+    - echo "Deployment completed successfully!"
+
