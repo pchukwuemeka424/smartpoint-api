@@ -86,14 +86,15 @@ let isConnected = false;
 const connectToDatabase = async () => {
     if (isConnected && mongoose.connection.readyState === 1) {
         console.log('Using existing database connection');
-        return;
+        return { success: true, message: 'Using existing connection' };
     }
     
     try {
         const mongoUri = process.env.MONGODB_URI || 'mongodb://localhost:27017/smartpos';
         mongoose.set('strictQuery', false);
         
-        await mongoose.connect(mongoUri, {
+        console.log('Attempting to connect to MongoDB...');
+        const result = await mongoose.connect(mongoUri, {
             serverSelectionTimeoutMS: 5000,
             socketTimeoutMS: 45000,
         });
@@ -103,9 +104,12 @@ const connectToDatabase = async () => {
         
         // Sync indexes
         await syncIndexes();
+        
+        return { success: true, message: 'Connected successfully', host: mongoose.connection.host };
     } catch (error) {
         console.error('Database connection error:', error);
         isConnected = false;
+        return { success: false, message: error.message, stack: error.stack };
     }
 };
 
@@ -129,15 +133,11 @@ app.use('/api/customers', require('./routes/customers'));
 
 // Health check endpoint
 app.get('/health', async (req, res) => {
-    let connectionError = null;
+    let connectionResult = null;
     
     // Try to connect if not already connected
     if (mongoose.connection.readyState !== 1) {
-        try {
-            await connectToDatabase();
-        } catch (error) {
-            connectionError = error.message;
-        }
+        connectionResult = await connectToDatabase();
     }
     
     const mongoStatus = mongoose.connection.readyState === 1 ? 'connected' : 'disconnected';
@@ -151,7 +151,7 @@ app.get('/health', async (req, res) => {
         hasMongoUri: !!process.env.MONGODB_URI,
         mongoUriPrefix: process.env.MONGODB_URI ? process.env.MONGODB_URI.substring(0, 20) + '...' : 'not set',
         isConnected: isConnected,
-        connectionError: connectionError
+        connectionResult: connectionResult
     });
 });
 
