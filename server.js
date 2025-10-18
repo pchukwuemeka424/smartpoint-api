@@ -133,13 +133,6 @@ app.use('/api/customers', require('./routes/customers'));
 
 // Health check endpoint
 app.get('/health', async (req, res) => {
-    let connectionResult = null;
-    
-    // Try to connect if not already connected
-    if (mongoose.connection.readyState !== 1) {
-        connectionResult = await connectToDatabase();
-    }
-    
     const mongoStatus = mongoose.connection.readyState === 1 ? 'connected' : 'disconnected';
     
     res.status(200).json({ 
@@ -147,11 +140,7 @@ app.get('/health', async (req, res) => {
         timestamp: new Date().toISOString(),
         uptime: process.uptime(),
         mongodb: mongoStatus,
-        mongoReadyState: mongoose.connection.readyState,
-        hasMongoUri: !!process.env.MONGODB_URI,
-        mongoUriPrefix: process.env.MONGODB_URI ? process.env.MONGODB_URI.substring(0, 20) + '...' : 'not set',
-        isConnected: isConnected,
-        connectionResult: connectionResult
+        environment: process.env.NODE_ENV || 'development'
     });
 });
 
