@@ -121,6 +121,27 @@ app.use(async (req, res, next) => {
     next();
 });
 
+// Welcome route
+app.get('/', (req, res) => {
+    res.status(200).json({
+        message: 'SmartPoint API',
+        version: '1.0.0',
+        status: 'running',
+        endpoints: {
+            health: '/health',
+            auth: '/api/auth',
+            items: '/api/items',
+            sales: '/api/sales',
+            finance: '/api/finance',
+            ai: '/api/ai',
+            settings: '/api/settings',
+            cashiers: '/api/cashiers',
+            customers: '/api/customers'
+        },
+        documentation: 'https://github.com/pchukwuemeka424/smartpoint-api'
+    });
+});
+
 // Routes
 app.use('/api/auth', require('./routes/auth'));
 app.use('/api/items', require('./routes/items'));
