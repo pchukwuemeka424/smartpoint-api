@@ -137,7 +137,10 @@ app.get('/health', async (req, res) => {
         timestamp: new Date().toISOString(),
         uptime: process.uptime(),
         mongodb: mongoStatus,
-        mongoReadyState: mongoose.connection.readyState
+        mongoReadyState: mongoose.connection.readyState,
+        hasMongoUri: !!process.env.MONGODB_URI,
+        mongoUriPrefix: process.env.MONGODB_URI ? process.env.MONGODB_URI.substring(0, 20) + '...' : 'not set',
+        isConnected: isConnected
     });
 });
 
