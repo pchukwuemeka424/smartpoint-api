@@ -128,12 +128,16 @@ app.use('/api/cashiers', require('./routes/cashiers'));
 app.use('/api/customers', require('./routes/customers'));
 
 // Health check endpoint
-app.get('/health', (req, res) => {
+app.get('/health', async (req, res) => {
+    // The middleware should have already connected, but check anyway
+    const mongoStatus = mongoose.connection.readyState === 1 ? 'connected' : 'disconnected';
+    
     res.status(200).json({ 
         status: 'OK', 
         timestamp: new Date().toISOString(),
         uptime: process.uptime(),
-        mongodb: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected'
+        mongodb: mongoStatus,
+        mongoReadyState: mongoose.connection.readyState
     });
 });
 
