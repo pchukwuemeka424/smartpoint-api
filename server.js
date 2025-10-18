@@ -80,6 +80,43 @@ const syncIndexes = async () => {
     }
 };
 
+// Initialize database connection for serverless
+let isConnected = false;
+
+const connectToDatabase = async () => {
+    if (isConnected && mongoose.connection.readyState === 1) {
+        console.log('Using existing database connection');
+        return;
+    }
+    
+    try {
+        const mongoUri = process.env.MONGODB_URI || 'mongodb://localhost:27017/smartpos';
+        mongoose.set('strictQuery', false);
+        
+        await mongoose.connect(mongoUri, {
+            serverSelectionTimeoutMS: 5000,
+            socketTimeoutMS: 45000,
+        });
+        
+        isConnected = true;
+        console.log('MongoDB Connected:', mongoose.connection.host);
+        
+        // Sync indexes
+        await syncIndexes();
+    } catch (error) {
+        console.error('Database connection error:', error);
+        isConnected = false;
+    }
+};
+
+// Middleware to ensure database connection before handling requests
+app.use(async (req, res, next) => {
+    if (!isConnected || mongoose.connection.readyState !== 1) {
+        await connectToDatabase();
+    }
+    next();
+});
+
 // Routes
 app.use('/api/auth', require('./routes/auth'));
 app.use('/api/items', require('./routes/items'));
@@ -114,22 +151,25 @@ app.use('*', (req, res) => {
     res.status(404).json({ message: 'Route not found' });
 });
 
-// Connect to database and start server
-connectDB().then(() => {
-    app.listen(PORT, () => {
-        console.log(`SmartPOS Server running on port ${PORT}`);
-        console.log(`Environment: ${process.env.NODE_ENV}`);
-        console.log(`Health check: http://localhost:${PORT}/health`);
+// For local development
+if (process.env.NODE_ENV !== 'production') {
+    connectDB().then(() => {
+        app.listen(PORT, () => {
+            console.log(`SmartPOS Server running on port ${PORT}`);
+            console.log(`Environment: ${process.env.NODE_ENV}`);
+            console.log(`Health check: http://localhost:${PORT}/health`);
+        });
     });
-});
-
-// Graceful shutdown
-process.on('SIGTERM', () => {
-    console.log('SIGTERM received, shutting down gracefully');
-    mongoose.connection.close(() => {
-        console.log('MongoDB connection closed');
-        process.exit(0);
+    
+    // Graceful shutdown
+    process.on('SIGTERM', () => {
+        console.log('SIGTERM received, shutting down gracefully');
+        mongoose.connection.close(() => {
+            console.log('MongoDB connection closed');
+            process.exit(0);
+        });
     });
-});
+}
 
+// Export for Vercel serverless
 module.exports = app;
