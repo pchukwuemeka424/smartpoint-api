@@ -886,6 +886,153 @@ const getCategoryColor = (category) => {
     return colors[Math.abs(hash) % colors.length];
 };
 
+// GET /api/finance/reports/cashier-daily-sales - Get cashier daily sales report
+router.get('/reports/cashier-daily-sales', auth, async (req, res) => {
+    try {
+        const { date, startDate, endDate, cashierId } = req.query;
+        
+        // Only managers can access this endpoint
+        if (req.user.role !== 'manager') {
+            return res.status(403).json({
+                success: false,
+                message: 'Only managers can access cashier daily sales reports'
+            });
+        }
+        
+        // Determine date range
+        let start, end;
+        if (date) {
+            // Single date provided
+            const selectedDate = new Date(date);
+            start = new Date(selectedDate.getFullYear(), selectedDate.getMonth(), selectedDate.getDate());
+            end = new Date(selectedDate.getFullYear(), selectedDate.getMonth(), selectedDate.getDate(), 23, 59, 59);
+        } else if (startDate && endDate) {
+            // Date range provided
+            start = new Date(startDate);
+            end = new Date(endDate);
+        } else {
+            // Default to today
+            const today = new Date();
+            start = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+            end = new Date(today.getFullYear(), today.getMonth(), today.getDate(), 23, 59, 59);
+        }
+        
+        // Build match query
+        const matchQuery = {
+            managerId: new mongoose.Types.ObjectId(req.user.id),
+            saleDate: { $gte: start, $lte: end }
+        };
+        
+        // Filter by cashier if provided
+        if (cashierId) {
+            matchQuery.cashierId = new mongoose.Types.ObjectId(cashierId);
+        }
+        
+        // Get all transactions for the date range
+        const transactions = await Sale.find(matchQuery)
+            .populate('cashierId', 'firstName lastName email')
+            .populate('customerId', 'name phone email')
+            .sort({ saleDate: -1 })
+            .lean();
+        
+        // Group transactions by cashier
+        const cashierMap = new Map();
+        
+        transactions.forEach(transaction => {
+            // Handle cashierId - can be ObjectId, populated object, or string
+            let cashierId = 'unknown';
+            if (transaction.cashierId) {
+                if (typeof transaction.cashierId === 'object' && transaction.cashierId._id) {
+                    cashierId = transaction.cashierId._id.toString();
+                } else if (typeof transaction.cashierId === 'object' && transaction.cashierId.toString) {
+                    cashierId = transaction.cashierId.toString();
+                } else {
+                    cashierId = transaction.cashierId.toString();
+                }
+            }
+            
+            const cashierName = transaction.cashierId && typeof transaction.cashierId === 'object'
+                ? `${transaction.cashierId.firstName || ''} ${transaction.cashierId.lastName || ''}`.trim() || transaction.cashierId.email || 'Unknown Cashier'
+                : 'Unknown Cashier';
+            
+            if (!cashierMap.has(cashierId)) {
+                cashierMap.set(cashierId, {
+                    cashierId,
+                    cashierName,
+                    transactions: [],
+                    totalSales: 0,
+                    totalTransactions: 0,
+                    totalItems: 0,
+                    partialPayments: 0,
+                    outstandingBalance: 0,
+                    partialTransactions: []
+                });
+            }
+            
+            const cashierData = cashierMap.get(cashierId);
+            const totalAmount = transaction.total || 0;
+            const paidAmount = transaction.paidAmount || 0;
+            const itemCount = transaction.items?.reduce((sum, item) => sum + (item.quantity || 0), 0) || 0;
+            const paymentStatus = transaction.paymentStatus || transaction.status || 'completed';
+            const isPartial = paymentStatus === 'partial' || paymentStatus === 'pending';
+            const outstandingBalance = Math.max(0, totalAmount - paidAmount);
+            
+            // Add transaction to cashier data
+            cashierData.transactions.push(transaction);
+            cashierData.totalSales += totalAmount;
+            cashierData.totalTransactions += 1;
+            cashierData.totalItems += itemCount;
+            
+            // Track partial payments
+            if (isPartial && outstandingBalance > 0) {
+                cashierData.partialPayments += 1;
+                cashierData.outstandingBalance += outstandingBalance;
+                
+                cashierData.partialTransactions.push({
+                    receiptNumber: transaction.receiptNumber || transaction._id?.toString() || 'N/A',
+                    customerName: transaction.customerName || transaction.customerId?.name || 'Unknown',
+                    total: totalAmount,
+                    paidAmount: paidAmount,
+                    outstandingBalance: outstandingBalance,
+                    date: transaction.saleDate || transaction.createdAt
+                });
+            }
+        });
+        
+        // Convert map to array and format response
+        const cashierSummaries = Array.from(cashierMap.values()).map(cashier => ({
+            cashierId: cashier.cashierId,
+            cashierName: cashier.cashierName,
+            totalSales: cashier.totalSales,
+            totalTransactions: cashier.totalTransactions,
+            totalItems: cashier.totalItems,
+            partialPayments: cashier.partialPayments,
+            outstandingBalance: cashier.outstandingBalance,
+            partialTransactions: cashier.partialTransactions,
+            transactions: cashier.transactions
+        })).sort((a, b) => b.totalSales - a.totalSales);
+        
+        res.json({
+            success: true,
+            data: {
+                date: date || (startDate && endDate ? `${startDate} to ${endDate}` : 'today'),
+                startDate: start,
+                endDate: end,
+                transactions: transactions,
+                cashierSummaries: cashierSummaries
+            }
+        });
+        
+    } catch (error) {
+        console.error('Cashier daily sales error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to get cashier daily sales',
+            error: error.message
+        });
+    }
+});
+
 // GET /api/finance/reports/sales - Get detailed sales report
 router.get('/reports/sales', auth, async (req, res) => {
     try {
