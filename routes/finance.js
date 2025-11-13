@@ -930,10 +930,23 @@ router.get('/reports/cashier-daily-sales', auth, async (req, res) => {
         
         // Get all transactions for the date range
         const transactions = await Sale.find(matchQuery)
-            .populate('cashierId', 'firstName lastName email')
+            .populate('cashierId', 'firstName lastName email username')
             .populate('customerId', 'name phone email')
             .sort({ saleDate: -1 })
             .lean();
+        
+        // Get all cashiers for lookup (in case some transactions have unpopulated cashierId)
+        const User = require('../models/User');
+        const allCashiers = await User.find({
+            role: 'cashier',
+            managerId: req.user.id
+        }).select('_id firstName lastName email username').lean();
+        
+        // Create a cashier lookup map
+        const cashierLookup = new Map();
+        allCashiers.forEach(cashier => {
+            cashierLookup.set(cashier._id.toString(), cashier);
+        });
         
         // Group transactions by cashier
         const cashierMap = new Map();
@@ -941,6 +954,8 @@ router.get('/reports/cashier-daily-sales', auth, async (req, res) => {
         transactions.forEach(transaction => {
             // Handle cashierId - can be ObjectId, populated object, or string
             let cashierId = 'unknown';
+            let cashierName = 'Unknown Cashier';
+            
             if (transaction.cashierId) {
                 if (typeof transaction.cashierId === 'object' && transaction.cashierId._id) {
                     cashierId = transaction.cashierId._id.toString();
@@ -951,9 +966,24 @@ router.get('/reports/cashier-daily-sales', auth, async (req, res) => {
                 }
             }
             
-            const cashierName = transaction.cashierId && typeof transaction.cashierId === 'object'
-                ? `${transaction.cashierId.firstName || ''} ${transaction.cashierId.lastName || ''}`.trim() || transaction.cashierId.email || 'Unknown Cashier'
-                : 'Unknown Cashier';
+            // Try to get cashier name from populated object
+            if (transaction.cashierId && typeof transaction.cashierId === 'object') {
+                const firstName = transaction.cashierId.firstName || '';
+                const lastName = transaction.cashierId.lastName || '';
+                const email = transaction.cashierId.email || '';
+                const username = transaction.cashierId.username || '';
+                const name = `${firstName} ${lastName}`.trim();
+                cashierName = name || email || username || 'Unknown Cashier';
+            } else if (cashierId !== 'unknown' && cashierLookup.has(cashierId)) {
+                // Look up cashier from the lookup map
+                const cashier = cashierLookup.get(cashierId);
+                const firstName = cashier.firstName || '';
+                const lastName = cashier.lastName || '';
+                const email = cashier.email || '';
+                const username = cashier.username || '';
+                const name = `${firstName} ${lastName}`.trim();
+                cashierName = name || email || username || 'Unknown Cashier';
+            }
             
             if (!cashierMap.has(cashierId)) {
                 cashierMap.set(cashierId, {
