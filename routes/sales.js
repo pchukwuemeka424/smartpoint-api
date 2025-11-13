@@ -821,4 +821,75 @@ router.post('/:id/complete-payment', auth, async (req, res) => {
     }
 });
 
+// PUT /api/sales/:id/mark-completed - Mark transaction as completed (for outstanding payments)
+router.put('/:id/mark-completed', auth, async (req, res) => {
+    try {
+        const { id } = req.params;
+        
+        // Find the sale
+        const sale = await Sale.findById(id);
+        
+        if (!sale) {
+            return res.status(404).json({
+                success: false,
+                message: 'Sale not found'
+            });
+        }
+        
+        // Verify user has permission to update this sale
+        if (req.user.role === 'cashier' && sale.cashierId && sale.cashierId.toString() !== req.user.id) {
+            return res.status(403).json({
+                success: false,
+                message: 'You do not have permission to update this sale'
+            });
+        }
+        
+        if (req.user.role === 'manager' && sale.managerId && sale.managerId.toString() !== req.user.id) {
+            return res.status(403).json({
+                success: false,
+                message: 'You do not have permission to update this sale'
+            });
+        }
+        
+        // Check if sale is already completed
+        if (sale.paymentStatus === 'completed') {
+            return res.status(400).json({
+                success: false,
+                message: 'This sale is already marked as completed'
+            });
+        }
+        
+        // Mark as completed - set paidAmount to total if not already
+        if (sale.paidAmount < sale.total) {
+            sale.paidAmount = sale.total;
+        }
+        
+        // Update payment status to completed
+        sale.paymentStatus = 'completed';
+        sale.change = 0; // No change if marking as completed
+        
+        // Update the sale
+        await sale.save();
+        
+        // Populate the sale with item details
+        await sale.populate('items.item', 'name category');
+        await sale.populate('cashierId', 'firstName lastName');
+        await sale.populate('managerId', 'firstName lastName');
+        
+        res.json({
+            success: true,
+            data: sale,
+            message: 'Transaction marked as completed successfully'
+        });
+        
+    } catch (error) {
+        console.error('Mark as completed error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to mark transaction as completed',
+            error: error.message
+        });
+    }
+});
+
 module.exports = router;
