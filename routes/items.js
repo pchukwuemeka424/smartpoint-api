@@ -179,13 +179,51 @@ router.get('/low-stock', auth, async (req, res) => {
 // GET /api/items/:id - Get single item (role-based)
 router.get('/:id', auth, async (req, res) => {
     try {
-        // Build query based on user role
-        let query;
+        // CRITICAL FIX: Find item by ID first, then check access
+        // DO NOT filter in query - we need to check manager-cashier relationship
+        const item = await Item.findOne({
+            _id: req.params.id,
+            isActive: true
+        });
+        
+        if (!item) {
+            return res.status(404).json({
+                success: false,
+                message: `Item with ID ${req.params.id} not found`
+            });
+        }
+        
+        // Verify access based on manager-cashier relationship
+        const User = require('../models/User');
+        let hasAccess = false;
+        
         if (req.user.role === 'manager') {
-            query = { _id: req.params.id, managerId: req.user.id, isActive: true };
+            // Manager can access:
+            // 1. Items they created
+            // 2. Items created by their cashiers
+            // 3. Items with managerId matching their id
+            const cashiers = await User.find({ managerId: req.user.id }).select('_id');
+            const cashierIds = cashiers.map(c => c._id.toString());
+            
+            hasAccess = 
+                item.userId.toString() === req.user.id ||
+                item.managerId.toString() === req.user.id ||
+                cashierIds.includes(item.userId.toString());
+                
+            console.log('[Items] Manager access check:', {
+                itemId: item._id.toString(),
+                itemName: item.name,
+                itemUserId: item.userId.toString(),
+                itemManagerId: item.managerId.toString(),
+                currentUserId: req.user.id,
+                cashierIds,
+                hasAccess
+            });
         } else if (req.user.role === 'cashier') {
-            // Cashiers should be able to view items from their manager's inventory
-            const User = require('../models/User');
+            // CRITICAL FIX: Cashier can access:
+            // 1. Items they created (item.userId === userId)
+            // 2. Items created by their manager (item.userId === managerId)
+            // 3. Items with managerId matching their manager (item.managerId === managerId)
             const cashier = await User.findById(req.user.id);
             if (!cashier || !cashier.managerId) {
                 return res.status(400).json({
@@ -193,16 +231,42 @@ router.get('/:id', auth, async (req, res) => {
                     message: 'Cashier not properly linked to a manager'
                 });
             }
-            query = { _id: req.params.id, managerId: cashier.managerId, isActive: true };
+            const managerId = cashier.managerId.toString();
+            
+            hasAccess = 
+                item.userId.toString() === req.user.id ||
+                item.userId.toString() === managerId ||
+                item.managerId.toString() === managerId;
+                
+            console.log('[Items] Cashier access check:', {
+                itemId: item._id.toString(),
+                itemName: item.name,
+                itemUserId: item.userId.toString(),
+                itemManagerId: item.managerId.toString(),
+                currentUserId: req.user.id,
+                currentManagerId: managerId,
+                hasAccess,
+                check1: item.userId.toString() === req.user.id,
+                check2: item.userId.toString() === managerId,
+                check3: item.managerId.toString() === managerId
+            });
         } else {
-            query = { _id: req.params.id, userId: req.user.id, isActive: true };
+            // Fallback: only own items
+            hasAccess = item.userId.toString() === req.user.id;
         }
         
-        const item = await Item.findOne(query);
-        
-        if (!item) {
-            return res.status(404).json({
-                message: 'Item not found'
+        if (!hasAccess) {
+            console.error('[Items] Access denied:', {
+                itemId: item._id.toString(),
+                itemName: item.name,
+                userId: req.user.id,
+                userRole: req.user.role,
+                itemUserId: item.userId.toString(),
+                itemManagerId: item.managerId.toString()
+            });
+            return res.status(403).json({
+                success: false,
+                message: 'Access denied to this item'
             });
         }
         
@@ -214,6 +278,7 @@ router.get('/:id', auth, async (req, res) => {
     } catch (error) {
         console.error('Get item error:', error);
         res.status(500).json({
+            success: false,
             message: 'Failed to get item',
             error: error.message
         });

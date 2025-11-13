@@ -202,7 +202,7 @@ router.get('/cashiers', auth, async (req, res) => {
             throw queryError;
         }
         
-        // Get cashier statistics
+        // Get cashier statistics - use paidAmount for actual revenue
         let cashierStats = [];
         try {
             cashierStats = await Sale.aggregate([
@@ -213,9 +213,10 @@ router.get('/cashiers', auth, async (req, res) => {
                 {
                     $group: {
                         _id: '$cashierId',
-                        totalSales: { $sum: '$total' },
+                        totalSales: { $sum: '$total' }, // Keep for reference
+                        totalRevenue: { $sum: '$paidAmount' }, // Actual revenue
                         transactionCount: { $sum: 1 },
-                        averageTransaction: { $avg: '$total' }
+                        averageTransaction: { $avg: '$paidAmount' } // Use paidAmount for average
                     }
                 },
                 {
@@ -233,12 +234,13 @@ router.get('/cashiers', auth, async (req, res) => {
                     $project: {
                         cashierId: '$_id',
                         cashierName: { $concat: ['$cashier.firstName', ' ', '$cashier.lastName'] },
-                        totalSales: 1,
+                        totalSales: '$totalRevenue', // Use revenue for display
+                        totalRevenue: 1,
                         transactionCount: 1,
                         averageTransaction: { $round: ['$averageTransaction', 2] }
                     }
                 },
-                { $sort: { totalSales: -1 } }
+                { $sort: { totalRevenue: -1 } }
             ]);
         } catch (aggError) {
             console.error('Cashier stats aggregation error:', aggError);
@@ -384,9 +386,10 @@ router.get('/daily/:date', auth, async (req, res) => {
             .populate('cashierId', 'firstName lastName username')
             .sort({ saleDate: -1 });
         
-        // Calculate summary
+        // Calculate summary - use paidAmount for actual revenue
         const summary = sales.reduce((acc, sale) => {
-            acc.totalSales += sale.total;
+            const paidAmount = sale.paidAmount || sale.total; // Use total as fallback for fully paid
+            acc.totalSales += paidAmount; // Use paidAmount instead of total
             acc.totalTransactions += 1;
             acc.totalItems += sale.items.reduce((sum, item) => sum + item.quantity, 0);
             return acc;
@@ -477,19 +480,103 @@ router.post('/checkout', auth, async (req, res) => {
                 });
             }
             
-            // Get item details from database
+            // CRITICAL FIX: Find item by ID first, then check access
+            // DO NOT filter by userId in the query - we need to check manager-cashier relationship
             const item = await Item.findOne({
                 _id: productId,
-                userId: req.user.id,
                 isActive: true
             });
             
-            console.log('Found item:', item);
+            console.log('Found item:', item ? { id: item._id, name: item.name, userId: item.userId, managerId: item.managerId } : 'null');
             
             if (!item) {
-                console.log('Item not found in database');
-                return res.status(404).json({
-                    message: `Item with ID ${productId} not found`
+                console.log('Item not found in database:', productId);
+                return res.status(400).json({
+                    success: false,
+                    message: `Item with ID ${productId} not found`,
+                    productId: productId
+                });
+            }
+            
+            // Verify access based on manager-cashier relationship
+            const User = require('../models/User');
+            let hasAccess = false;
+            
+            if (req.user.role === 'manager') {
+                // Manager can access:
+                // 1. Items they created (item.userId === userId)
+                // 2. Items created by their cashiers (item.userId in cashierIds)
+                // 3. Items with managerId matching their id (item.managerId === userId)
+                const cashiers = await User.find({ managerId: req.user.id }).select('_id');
+                const cashierIds = cashiers.map(c => c._id.toString());
+                
+                hasAccess = 
+                    item.userId.toString() === req.user.id ||
+                    item.managerId.toString() === req.user.id ||
+                    cashierIds.includes(item.userId.toString());
+                    
+                console.log('Manager access check:', {
+                    itemName: item.name,
+                    itemUserId: item.userId.toString(),
+                    itemManagerId: item.managerId.toString(),
+                    userId: req.user.id,
+                    cashierIds,
+                    hasAccess
+                });
+            } else if (req.user.role === 'cashier') {
+                // CRITICAL FIX: Cashier can access:
+                // 1. Items they created (item.userId === userId)
+                // 2. Items created by their manager (item.userId === managerId)
+                // 3. Items with managerId matching their manager (item.managerId === managerId)
+                const cashier = await User.findById(req.user.id);
+                if (!cashier || !cashier.managerId) {
+                    console.error('Cashier not properly linked to manager:', {
+                        cashierId: req.user.id,
+                        hasCashier: !!cashier,
+                        managerId: cashier?.managerId
+                    });
+                    return res.status(400).json({
+                        success: false,
+                        message: 'Cashier not properly linked to a manager. Please contact support.',
+                        productId: productId
+                    });
+                }
+                const managerId = cashier.managerId.toString();
+                
+                hasAccess = 
+                    item.userId.toString() === req.user.id ||
+                    item.userId.toString() === managerId ||
+                    item.managerId.toString() === managerId;
+                    
+                console.log('Cashier access check:', {
+                    itemName: item.name,
+                    itemUserId: item.userId.toString(),
+                    itemManagerId: item.managerId.toString(),
+                    userId: req.user.id,
+                    managerId,
+                    hasAccess,
+                    check1: item.userId.toString() === req.user.id,
+                    check2: item.userId.toString() === managerId,
+                    check3: item.managerId.toString() === managerId
+                });
+            } else {
+                // Fallback: only own items
+                hasAccess = item.userId.toString() === req.user.id;
+            }
+            
+            if (!hasAccess) {
+                console.error('Access denied to item:', {
+                    productId,
+                    itemName: item.name,
+                    userId: req.user.id,
+                    userRole: req.user.role,
+                    itemUserId: item.userId.toString(),
+                    itemManagerId: item.managerId.toString()
+                });
+                return res.status(403).json({
+                    success: false,
+                    message: `Access denied to item: ${item.name}`,
+                    productId: productId
                 });
             }
             

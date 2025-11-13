@@ -16,7 +16,7 @@ router.get('/dashboard', auth, async (req, res) => {
         const startDate = new Date();
         startDate.setDate(startDate.getDate() - days);
         
-        // Get sales summary
+        // Get sales summary - now returns totalRevenue (paidAmount)
         const salesSummary = await Sale.getSalesReport(req.user.id, startDate, endDate);
         
         // Get financial summary from transactions
@@ -48,6 +48,10 @@ router.get('/dashboard', auth, async (req, res) => {
             return ((current - previous) / previous) * 100;
         };
         
+        // Use revenue (paidAmount) for sales calculations
+        const currentRevenue = salesSummary[0]?.totalRevenue || salesSummary[0]?.totalSales || 0;
+        const prevRevenue = prevSalesSummary[0]?.totalRevenue || prevSalesSummary[0]?.totalSales || 0;
+        
         const dashboard = {
             period: {
                 days,
@@ -55,14 +59,12 @@ router.get('/dashboard', auth, async (req, res) => {
                 endDate
             },
             sales: {
-                total: salesSummary[0]?.totalSales || 0,
+                total: currentRevenue, // Use actual revenue (paidAmount)
+                totalRevenue: currentRevenue, // Explicit revenue field
                 transactions: salesSummary[0]?.totalTransactions || 0,
                 average: salesSummary[0]?.averageTransaction || 0,
                 items: salesSummary[0]?.totalItems || 0,
-                growth: calculateGrowth(
-                    salesSummary[0]?.totalSales || 0,
-                    prevSalesSummary[0]?.totalSales || 0
-                )
+                growth: calculateGrowth(currentRevenue, prevRevenue)
             },
             finance: {
                 income: income.total,
@@ -99,103 +101,200 @@ router.get('/dashboard', auth, async (req, res) => {
 // GET /api/finance/dashboard/home - Get home screen dashboard data
 router.get('/dashboard/home', auth, async (req, res) => {
     try {
-        console.log('Dashboard home request received for user:', req.user.id, 'role:', req.user.role);
-        console.log('Data fetching strategy:', req.user.role === 'manager' ? 'Manager - all data under management' : 'Cashier - own data only');
+        console.log('📊 Dashboard home request - User:', req.user.id, 'Role:', req.user.role);
+        
+        // Set up date ranges
         const today = new Date();
         const startOfToday = new Date(today.getFullYear(), today.getMonth(), today.getDate());
-        const endOfToday = new Date(today.getFullYear(), today.getMonth(), today.getDate(), 23, 59, 59);
+        startOfToday.setHours(0, 0, 0, 0);
+        const endOfToday = new Date(today.getFullYear(), today.getMonth(), today.getDate(), 23, 59, 59, 999);
         
-        const startOfMonth = new Date(today.getFullYear(), today.getMonth(), 1);
-        const endOfMonth = new Date(today.getFullYear(), today.getMonth() + 1, 0, 23, 59, 59);
-        
-        // Get yesterday's date range for comparison
         const yesterday = new Date(today);
         yesterday.setDate(yesterday.getDate() - 1);
         const startOfYesterday = new Date(yesterday.getFullYear(), yesterday.getMonth(), yesterday.getDate());
-        const endOfYesterday = new Date(yesterday.getFullYear(), yesterday.getMonth(), yesterday.getDate(), 23, 59, 59);
+        startOfYesterday.setHours(0, 0, 0, 0);
+        const endOfYesterday = new Date(yesterday.getFullYear(), yesterday.getMonth(), yesterday.getDate(), 23, 59, 59, 999);
         
-        // Get this week's date range
         const startOfWeek = new Date(today);
         startOfWeek.setDate(today.getDate() - today.getDay());
+        startOfWeek.setHours(0, 0, 0, 0);
         const endOfWeek = new Date(today);
         endOfWeek.setDate(today.getDate() + (6 - today.getDay()));
+        endOfWeek.setHours(23, 59, 59, 999);
         
-        // Get today's sales - for managers, include all sales under their management; for cashiers, only their own sales
-        const todaySalesMatch = req.user.role === 'manager' 
-            ? { managerId: new mongoose.Types.ObjectId(req.user.id) }
-            : { userId: new mongoose.Types.ObjectId(req.user.id) };
-            
+        const startOfMonth = new Date(today.getFullYear(), today.getMonth(), 1);
+        startOfMonth.setHours(0, 0, 0, 0);
+        const endOfMonth = new Date(today.getFullYear(), today.getMonth() + 1, 0, 23, 59, 59, 999);
+        
+        console.log('📅 Date Ranges:');
+        console.log('   Today:', startOfToday.toISOString(), 'to', endOfToday.toISOString());
+        
+        // Build user filter - for managers: all sales under management, for cashiers: own sales
+        let userFilter = {};
+        try {
+            const userId = new mongoose.Types.ObjectId(req.user.id);
+            if (req.user.role === 'manager') {
+                userFilter = { managerId: userId };
+            } else {
+                userFilter = {
+                    $or: [
+                        { userId: userId },
+                        { cashierId: userId }
+                    ]
+                };
+            }
+        } catch (error) {
+            console.error('❌ Error creating ObjectId, using string:', error.message);
+            if (req.user.role === 'manager') {
+                userFilter = { managerId: req.user.id };
+            } else {
+                userFilter = {
+                    $or: [
+                        { userId: req.user.id },
+                        { cashierId: req.user.id }
+                    ]
+                };
+            }
+        }
+        
+        // TODAY'S SALES AGGREGATION - Simple and direct
+        // This is the core calculation that sums ALL paidAmount values
+        const todaySalesMatch = {
+            ...userFilter,
+            saleDate: { $gte: startOfToday, $lte: endOfToday }
+        };
+        
+        console.log('🔍 Today Sales Match:', JSON.stringify(todaySalesMatch, null, 2));
+        
         const todaySales = await Sale.aggregate([
             {
-                $match: {
-                    ...todaySalesMatch,
-                    saleDate: { $gte: startOfToday, $lte: endOfToday },
-                    paymentStatus: 'completed'
-                }
+                $match: todaySalesMatch
             },
             {
                 $group: {
                     _id: null,
-                    totalSales: { $sum: '$total' },
+                    // Sum of ALL paidAmount values - this is what we display (500 + 6000 = 6500)
+                    totalRevenue: { $sum: { $ifNull: ['$paidAmount', 0] } },
+                    // Sum of all transaction totals (for reference)
+                    totalSales: { $sum: { $ifNull: ['$total', 0] } },
+                    // Count transactions
                     totalTransactions: { $sum: 1 },
-                    totalItems: { $sum: { $sum: '$items.quantity' } }
+                    // Sum items
+                    totalItems: { $sum: { $sum: { $ifNull: ['$items.quantity', 0] } } },
+                    // Calculate outstanding (total - paidAmount) for each transaction
+                    totalOutstanding: {
+                        $sum: {
+                            $max: [
+                                0,
+                                {
+                                    $subtract: [
+                                        { $ifNull: ['$total', 0] },
+                                        { $ifNull: ['$paidAmount', 0] }
+                                    ]
+                                }
+                            ]
+                        }
+                    },
+                    // Count partial payments
+                    partialPaymentsCount: {
+                        $sum: {
+                            $cond: [
+                                {
+                                    $and: [
+                                        { $gt: [{ $ifNull: ['$paidAmount', 0] }, 0] },
+                                        { $lt: [{ $ifNull: ['$paidAmount', 0] }, { $ifNull: ['$total', 0] }] }
+                                    ]
+                                },
+                                1,
+                                0
+                            ]
+                        }
+                    }
                 }
             }
         ]);
         
-        console.log('Today sales result:', todaySales);
+        // Get today's revenue - this is the sum of ALL paidAmount values
+        const todayRevenue = todaySales[0]?.totalRevenue || 0;
+        const todayTotalSales = todaySales[0]?.totalSales || 0;
         
-        // Get yesterday's sales for comparison - for managers, include all sales under their management; for cashiers, only their own sales
+        console.log('💰 TODAY\'S REVENUE CALCULATION:');
+        console.log('   Total Revenue (sum of all paidAmount):', todayRevenue);
+        console.log('   Total Sales (sum of all totals):', todayTotalSales);
+        console.log('   Outstanding:', todaySales[0]?.totalOutstanding || 0);
+        console.log('   Partial Payments:', todaySales[0]?.partialPaymentsCount || 0);
+        console.log('   Transactions:', todaySales[0]?.totalTransactions || 0);
+        
+        // Verify: Query all transactions to manually verify the sum
+        const allTodayTransactions = await Sale.find(todaySalesMatch)
+            .select('receiptNumber total paidAmount paymentStatus saleDate')
+            .lean();
+        
+        const manualSum = allTodayTransactions.reduce((sum, tx) => {
+            return sum + (Number(tx.paidAmount) || 0);
+        }, 0);
+        
+        console.log('   Manual verification sum:', manualSum);
+        console.log('   Transactions found:', allTodayTransactions.length);
+        
+        if (Math.abs(todayRevenue - manualSum) > 0.01) {
+            console.log('⚠️ WARNING: Aggregation and manual sum differ!');
+            console.log('   Using aggregation result:', todayRevenue);
+        }
+        
+        // List all transactions for debugging
+        allTodayTransactions.forEach((tx, idx) => {
+            console.log(`   ${idx + 1}. ${tx.receiptNumber}: paidAmount=${tx.paidAmount}, total=${tx.total}, status=${tx.paymentStatus}`);
+        });
+        
+        // YESTERDAY'S SALES
+        const yesterdaySalesMatch = {
+            ...userFilter,
+            saleDate: { $gte: startOfYesterday, $lte: endOfYesterday }
+        };
+        
         const yesterdaySales = await Sale.aggregate([
-            {
-                $match: {
-                    ...todaySalesMatch,
-                    saleDate: { $gte: startOfYesterday, $lte: endOfYesterday },
-                    paymentStatus: 'completed'
-                }
-            },
+            { $match: yesterdaySalesMatch },
             {
                 $group: {
                     _id: null,
-                    totalSales: { $sum: '$total' },
+                    totalRevenue: { $sum: { $ifNull: ['$paidAmount', 0] } },
+                    totalSales: { $sum: { $ifNull: ['$total', 0] } },
                     totalTransactions: { $sum: 1 }
                 }
             }
         ]);
         
-        console.log('Yesterday sales result:', yesterdaySales);
+        // WEEK'S SALES
+        const weekSalesMatch = {
+            ...userFilter,
+            saleDate: { $gte: startOfWeek, $lte: endOfWeek }
+        };
         
-        // Get this week's sales - for managers, include all sales under their management; for cashiers, only their own sales
         const weekSales = await Sale.aggregate([
-            {
-                $match: {
-                    ...todaySalesMatch,
-                    saleDate: { $gte: startOfWeek, $lte: endOfWeek },
-                    paymentStatus: 'completed'
-                }
-            },
+            { $match: weekSalesMatch },
             {
                 $group: {
                     _id: null,
-                    totalSales: { $sum: '$total' },
+                    totalRevenue: { $sum: { $ifNull: ['$paidAmount', 0] } },
+                    totalSales: { $sum: { $ifNull: ['$total', 0] } },
                     totalTransactions: { $sum: 1 }
                 }
             }
         ]);
         
-        // Get monthly revenue - for managers, include all sales under their management; for cashiers, only their own sales
+        // MONTHLY REVENUE
+        const monthlySalesMatch = {
+            ...userFilter,
+            saleDate: { $gte: startOfMonth, $lte: endOfMonth }
+        };
+        
         const monthlyRevenue = await Sale.aggregate([
-            {
-                $match: {
-                    ...todaySalesMatch,
-                    saleDate: { $gte: startOfMonth, $lte: endOfMonth },
-                    paymentStatus: 'completed'
-                }
-            },
+            { $match: monthlySalesMatch },
             {
                 $group: {
                     _id: null,
-                    totalRevenue: { $sum: '$total' }
+                    totalRevenue: { $sum: { $ifNull: ['$paidAmount', 0] } }
                 }
             }
         ]);
@@ -292,17 +391,17 @@ router.get('/dashboard/home', auth, async (req, res) => {
                     $match: {
                         managerId: new mongoose.Types.ObjectId(req.user.id),
                         cashierId: { $exists: true },
-                        saleDate: { $gte: startOfToday, $lte: endOfToday },
-                        paymentStatus: 'completed'
+                        saleDate: { $gte: startOfToday, $lte: endOfToday }
                     }
                 },
                 {
                     $group: {
                         _id: '$cashierId',
-                        totalSales: { $sum: '$total' },
+                        totalSales: { $sum: '$total' }, // Keep for reference
+                        totalRevenue: { $sum: '$paidAmount' }, // Actual revenue
                         totalTransactions: { $sum: 1 },
                         totalItems: { $sum: { $sum: '$items.quantity' } },
-                        averageTransactionValue: { $avg: '$total' }
+                        averageTransactionValue: { $avg: '$paidAmount' } // Use paidAmount for average
                     }
                 },
                 {
@@ -320,14 +419,15 @@ router.get('/dashboard/home', auth, async (req, res) => {
                     $project: {
                         cashierId: '$_id',
                         cashierName: { $concat: ['$cashier.firstName', ' ', '$cashier.lastName'] },
-                        totalSales: 1,
+                        totalSales: '$totalRevenue', // Use revenue for display
+                        totalRevenue: 1,
                         totalTransactions: 1,
                         totalItems: 1,
                         averageTransactionValue: { $round: ['$averageTransactionValue', 2] }
                     }
                 },
                 {
-                    $sort: { totalSales: -1 }
+                    $sort: { totalRevenue: -1 }
                 }
             ]);
             
@@ -340,14 +440,14 @@ router.get('/dashboard/home', auth, async (req, res) => {
                     $match: {
                         managerId: new mongoose.Types.ObjectId(req.user.id),
                         cashierId: { $exists: true },
-                        saleDate: { $gte: startOfWeek, $lte: endOfWeek },
-                        paymentStatus: 'completed'
+                        saleDate: { $gte: startOfWeek, $lte: endOfWeek }
                     }
                 },
                 {
                     $group: {
                         _id: '$cashierId',
-                        totalSales: { $sum: '$total' },
+                        totalSales: { $sum: '$total' }, // Keep for reference
+                        totalRevenue: { $sum: '$paidAmount' }, // Actual revenue
                         totalTransactions: { $sum: 1 },
                         totalItems: { $sum: { $sum: '$items.quantity' } }
                     }
@@ -367,13 +467,14 @@ router.get('/dashboard/home', auth, async (req, res) => {
                     $project: {
                         cashierId: '$_id',
                         cashierName: { $concat: ['$cashier.firstName', ' ', '$cashier.lastName'] },
-                        totalSales: 1,
+                        totalSales: '$totalRevenue', // Use revenue for display
+                        totalRevenue: 1,
                         totalTransactions: 1,
                         totalItems: 1
                     }
                 },
                 {
-                    $sort: { totalSales: -1 }
+                    $sort: { totalRevenue: -1 }
                 }
             ]);
             
@@ -387,33 +488,48 @@ router.get('/dashboard/home', auth, async (req, res) => {
             };
         }
         
-        // Calculate trends and percentages
-        const yesterdaySalesAmount = yesterdaySales[0]?.totalSales || 0;
-        const todaySalesAmount = todaySales[0]?.totalSales || 0;
-        const salesGrowth = yesterdaySalesAmount > 0 ? 
-            ((todaySalesAmount - yesterdaySalesAmount) / yesterdaySalesAmount * 100) : 0;
+        // Calculate trends
+        const yesterdayRevenue = yesterdaySales[0]?.totalRevenue || 0;
+        const weekRevenue = weekSales[0]?.totalRevenue || 0;
+        const monthlyRevenueValue = monthlyRevenue[0]?.totalRevenue || 0;
         
-        const weekSalesAmount = weekSales[0]?.totalSales || 0;
-        const dailyAverage = weekSalesAmount / 7;
+        const salesGrowth = yesterdayRevenue > 0 ? 
+            ((todayRevenue - yesterdayRevenue) / yesterdayRevenue * 100) : 0;
+        
+        const dailyAverage = weekRevenue / 7;
         const todayVsAverage = dailyAverage > 0 ? 
-            ((todaySalesAmount - dailyAverage) / dailyAverage * 100) : 0;
-
+            ((todayRevenue - dailyAverage) / dailyAverage * 100) : 0;
+        
+        console.log('📈 TRENDS:');
+        console.log('   Today Revenue:', todayRevenue);
+        console.log('   Yesterday Revenue:', yesterdayRevenue);
+        console.log('   Week Revenue:', weekRevenue);
+        console.log('   Monthly Revenue:', monthlyRevenueValue);
+        console.log('   Sales Growth:', salesGrowth.toFixed(2) + '%');
+        
+        // FINAL RESPONSE DATA
+        // Use todayRevenue which is the sum of ALL paidAmount values from database
         const dashboardData = {
-            // Today's data
-            todaySales: todaySalesAmount,
+            // Today's data - CRITICAL: todayRevenue is sum of ALL paidAmount (500 + 6000 = 6500)
+            todaySales: todayRevenue, // This is the actual amount paid (sum of all paidAmount)
+            todayTotalSales: todayTotalSales, // Total sales amount (sum of all transaction totals)
+            todayAmountPaid: todayRevenue, // Explicit amount paid (same as todaySales)
+            todayPaidAmount: todayRevenue, // Alternative field name
+            todayOutstanding: todaySales[0]?.totalOutstanding || 0,
+            todayPartialPayments: todaySales[0]?.partialPaymentsCount || 0,
             todayTransactions: todaySales[0]?.totalTransactions || 0,
             todayItems: todaySales[0]?.totalItems || 0,
             
-            // Yesterday's data for comparison
-            yesterdaySales: yesterdaySalesAmount,
+            // Yesterday's data
+            yesterdaySales: yesterdayRevenue,
             yesterdayTransactions: yesterdaySales[0]?.totalTransactions || 0,
             
             // Weekly data
-            weekSales: weekSalesAmount,
+            weekSales: weekRevenue,
             weekTransactions: weekSales[0]?.totalTransactions || 0,
             
             // Monthly data
-            monthlyRevenue: monthlyRevenue[0]?.totalRevenue || 0,
+            monthlyRevenue: monthlyRevenueValue,
             
             // Product data
             totalProducts,
@@ -436,14 +552,21 @@ router.get('/dashboard/home', auth, async (req, res) => {
             ...cashiersData
         };
         
-            console.log('Dashboard data being sent:', dashboardData);
-            console.log('Total products found:', totalProducts);
-            console.log('Low stock count:', lowStockCount);
-            console.log('Today sales amount:', todaySales[0]?.totalSales || 0);
-            res.json({
-                success: true,
-                data: dashboardData
-            });
+        console.log('✅ FINAL RESPONSE DATA:');
+        console.log('   todaySales (amount paid):', dashboardData.todaySales);
+        console.log('   todayTotalSales:', dashboardData.todayTotalSales);
+        console.log('   todayAmountPaid:', dashboardData.todayAmountPaid);
+        console.log('   Expected: 6500 (500 + 6000)');
+        console.log('   Actual:', dashboardData.todaySales);
+        
+        if (dashboardData.todaySales !== 6500 && allTodayTransactions.length >= 2) {
+            console.log('⚠️ WARNING: Response value does not match expected 6500!');
+        }
+        
+        res.json({
+            success: true,
+            data: dashboardData
+        });
         
     } catch (error) {
         console.error('Home dashboard error:', error);
@@ -490,29 +613,26 @@ router.get('/reports/comprehensive', auth, async (req, res) => {
             }
         }
         
-        // Build match query based on user role
+        // Build match query based on user role (removed paymentStatus filter to include all sales)
         let salesMatch;
         if (req.user.role === 'manager') {
             salesMatch = { 
                 managerId: new mongoose.Types.ObjectId(req.user.id),
-                saleDate: { $gte: start, $lte: end },
-                paymentStatus: 'completed'
+                saleDate: { $gte: start, $lte: end }
             };
         } else if (req.user.role === 'cashier') {
             salesMatch = { 
                 cashierId: new mongoose.Types.ObjectId(req.user.id),
-                saleDate: { $gte: start, $lte: end },
-                paymentStatus: 'completed'
+                saleDate: { $gte: start, $lte: end }
             };
         } else {
             salesMatch = { 
                 userId: new mongoose.Types.ObjectId(req.user.id),
-                saleDate: { $gte: start, $lte: end },
-                paymentStatus: 'completed'
+                saleDate: { $gte: start, $lte: end }
             };
         }
 
-        // Get sales summary
+        // Get sales summary - use paidAmount for actual revenue
         const salesSummary = await Sale.aggregate([
             {
                 $match: salesMatch
@@ -520,9 +640,10 @@ router.get('/reports/comprehensive', auth, async (req, res) => {
             {
                 $group: {
                     _id: null,
-                    totalSales: { $sum: '$total' },
+                    totalSales: { $sum: '$total' }, // Keep for reference
+                    totalRevenue: { $sum: '$paidAmount' }, // Actual revenue
                     totalOrders: { $sum: 1 },
-                    averageOrderValue: { $avg: '$total' },
+                    averageOrderValue: { $avg: '$paidAmount' }, // Use paidAmount for average
                     totalItems: { $sum: { $sum: '$items.quantity' } }
                 }
             }
@@ -580,7 +701,7 @@ router.get('/reports/comprehensive', auth, async (req, res) => {
             { $sort: { amount: -1 } }
         ]);
         
-        // Get daily sales data
+        // Get daily sales data - use paidAmount for actual revenue
         const dailySales = await Sale.aggregate([
             {
                 $match: salesMatch
@@ -592,7 +713,8 @@ router.get('/reports/comprehensive', auth, async (req, res) => {
                         month: { $month: '$saleDate' },
                         day: { $dayOfMonth: '$saleDate' }
                     },
-                    amount: { $sum: '$total' },
+                    amount: { $sum: '$paidAmount' }, // Actual revenue
+                    totalSales: { $sum: '$total' }, // Keep for reference
                     orders: { $sum: 1 }
                 }
             },
@@ -601,7 +723,7 @@ router.get('/reports/comprehensive', auth, async (req, res) => {
             }
         ]);
         
-        // Get hourly sales data
+        // Get hourly sales data - use paidAmount for actual revenue
         const hourlySales = await Sale.aggregate([
             {
                 $match: salesMatch
@@ -609,7 +731,7 @@ router.get('/reports/comprehensive', auth, async (req, res) => {
             {
                 $group: {
                     _id: { $hour: '$saleDate' },
-                    amount: { $sum: '$total' }
+                    amount: { $sum: '$paidAmount' } // Actual revenue
                 }
             },
             { $sort: { '_id': 1 } }
@@ -676,23 +798,23 @@ router.get('/reports/comprehensive', auth, async (req, res) => {
                 isActive: true
             });
 
-            // Get cashier performance for the selected period
+            // Get cashier performance for the selected period - use paidAmount for actual revenue
             const cashierPerformance = await Sale.aggregate([
                 {
                     $match: {
                         managerId: new mongoose.Types.ObjectId(req.user.id),
                         cashierId: { $exists: true, $ne: null },
-                        saleDate: { $gte: start, $lte: end },
-                        paymentStatus: 'completed'
+                        saleDate: { $gte: start, $lte: end }
                     }
                 },
                 {
                     $group: {
                         _id: '$cashierId',
-                        totalSales: { $sum: '$total' },
+                        totalSales: { $sum: '$total' }, // Keep for reference
+                        totalRevenue: { $sum: '$paidAmount' }, // Actual revenue
                         totalTransactions: { $sum: 1 },
                         totalItems: { $sum: { $sum: '$items.quantity' } },
-                        averageTransactionValue: { $avg: '$total' },
+                        averageTransactionValue: { $avg: '$paidAmount' }, // Use paidAmount for average
                         lastActivity: { $max: '$saleDate' }
                     }
                 },
@@ -711,7 +833,8 @@ router.get('/reports/comprehensive', auth, async (req, res) => {
                     $project: {
                         cashierId: '$_id',
                         cashierName: { $concat: ['$cashier.firstName', ' ', '$cashier.lastName'] },
-                        totalSales: 1,
+                        totalSales: '$totalRevenue', // Use revenue for display
+                        totalRevenue: 1,
                         totalTransactions: 1,
                         totalItems: 1,
                         averageTransactionValue: { $round: ['$averageTransactionValue', 2] },
@@ -720,21 +843,20 @@ router.get('/reports/comprehensive', auth, async (req, res) => {
                     }
                 },
                 {
-                    $sort: { totalSales: -1 }
+                    $sort: { totalRevenue: -1 }
                 }
             ]);
 
             // Get top performing cashier
             const topPerformingCashier = cashierPerformance.length > 0 ? cashierPerformance[0] : null;
 
-            // Get daily cashier activity for the period
+            // Get daily cashier activity for the period - use paidAmount for actual revenue
             const dailyCashierActivity = await Sale.aggregate([
                 {
                     $match: {
                         managerId: new mongoose.Types.ObjectId(req.user.id),
                         cashierId: { $exists: true, $ne: null },
-                        saleDate: { $gte: start, $lte: end },
-                        paymentStatus: 'completed'
+                        saleDate: { $gte: start, $lte: end }
                     }
                 },
                 {
@@ -745,7 +867,7 @@ router.get('/reports/comprehensive', auth, async (req, res) => {
                             day: { $dayOfMonth: '$saleDate' },
                             cashierId: '$cashierId'
                         },
-                        dailySales: { $sum: '$total' },
+                        dailySales: { $sum: '$paidAmount' }, // Actual revenue
                         dailyTransactions: { $sum: 1 }
                     }
                 },
@@ -790,9 +912,10 @@ router.get('/reports/comprehensive', auth, async (req, res) => {
             };
         }
 
-        // Calculate totals
+        // Calculate totals - use revenue (paidAmount) for actual money received
         const summary = salesSummary[0] || {
             totalSales: 0,
+            totalRevenue: 0,
             totalOrders: 0,
             averageOrderValue: 0,
             totalItems: 0
@@ -808,7 +931,8 @@ router.get('/reports/comprehensive', auth, async (req, res) => {
                 endDate: end
             },
             summary: {
-                totalSales: summary.totalSales,
+                totalSales: summary.totalRevenue || summary.totalSales, // Use revenue (actual money received)
+                totalRevenue: summary.totalRevenue || 0, // Explicit revenue field
                 totalOrders: summary.totalOrders,
                 averageOrderValue: summary.averageOrderValue,
                 totalItems: summary.totalItems
@@ -1001,15 +1125,15 @@ router.get('/reports/cashier-daily-sales', auth, async (req, res) => {
             
             const cashierData = cashierMap.get(cashierId);
             const totalAmount = transaction.total || 0;
-            const paidAmount = transaction.paidAmount || 0;
+            const paidAmount = transaction.paidAmount || totalAmount; // Use totalAmount as fallback for fully paid
             const itemCount = transaction.items?.reduce((sum, item) => sum + (item.quantity || 0), 0) || 0;
             const paymentStatus = transaction.paymentStatus || transaction.status || 'completed';
             const isPartial = paymentStatus === 'partial' || paymentStatus === 'pending';
             const outstandingBalance = Math.max(0, totalAmount - paidAmount);
             
-            // Add transaction to cashier data
+            // Add transaction to cashier data - use paidAmount for actual revenue
             cashierData.transactions.push(transaction);
-            cashierData.totalSales += totalAmount;
+            cashierData.totalSales += paidAmount; // Use paidAmount instead of totalAmount
             cashierData.totalTransactions += 1;
             cashierData.totalItems += itemCount;
             
@@ -1098,16 +1222,16 @@ router.get('/reports/sales', auth, async (req, res) => {
             {
                 $match: {
                     userId: new mongoose.Types.ObjectId(req.user.id),
-                    saleDate: { $gte: start, $lte: end },
-                    paymentStatus: 'completed'
+                    saleDate: { $gte: start, $lte: end }
                 }
             },
             {
                 $group: {
                     _id: groupByConfig[groupBy] || groupByConfig.day,
-                    totalSales: { $sum: '$total' },
+                    totalSales: { $sum: '$total' }, // Keep for reference
+                    totalRevenue: { $sum: '$paidAmount' }, // Actual revenue
                     totalTransactions: { $sum: 1 },
-                    averageTransaction: { $avg: '$total' },
+                    averageTransaction: { $avg: '$paidAmount' }, // Use paidAmount for average
                     totalItems: { $sum: { $sum: '$items.quantity' } },
                     totalTax: { $sum: '$tax' },
                     totalDiscount: { $sum: '$discount' }
@@ -1118,19 +1242,18 @@ router.get('/reports/sales', auth, async (req, res) => {
             }
         ]);
         
-        // Get payment method breakdown
+        // Get payment method breakdown - use paidAmount for actual revenue
         const paymentMethodBreakdown = await Sale.aggregate([
             {
                 $match: {
                     userId: new mongoose.Types.ObjectId(req.user.id),
-                    saleDate: { $gte: start, $lte: end },
-                    paymentStatus: 'completed'
+                    saleDate: { $gte: start, $lte: end }
                 }
             },
             {
                 $group: {
                     _id: '$paymentMethod',
-                    total: { $sum: '$total' },
+                    total: { $sum: '$paidAmount' }, // Actual revenue
                     count: { $sum: 1 }
                 }
             },
@@ -1139,13 +1262,12 @@ router.get('/reports/sales', auth, async (req, res) => {
             }
         ]);
         
-        // Get category breakdown
+        // Get category breakdown - use paidAmount for actual revenue
         const categoryBreakdown = await Sale.aggregate([
             {
                 $match: {
                     userId: new mongoose.Types.ObjectId(req.user.id),
-                    saleDate: { $gte: start, $lte: end },
-                    paymentStatus: 'completed'
+                    saleDate: { $gte: start, $lte: end }
                 }
             },
             { $unwind: '$items' },
@@ -1175,11 +1297,15 @@ router.get('/reports/sales', auth, async (req, res) => {
             success: true,
             data: {
                 period: { startDate: start, endDate: end, groupBy },
-                salesData: salesReport,
+                salesData: salesReport.map(item => ({
+                    ...item,
+                    totalSales: item.totalRevenue || item.totalSales // Use revenue for display
+                })),
                 paymentMethods: paymentMethodBreakdown,
                 categories: categoryBreakdown,
                 summary: {
-                    totalSales: salesReport.reduce((sum, item) => sum + item.totalSales, 0),
+                    totalSales: salesReport.reduce((sum, item) => sum + (item.totalRevenue || item.totalSales), 0), // Use revenue
+                    totalRevenue: salesReport.reduce((sum, item) => sum + (item.totalRevenue || 0), 0), // Explicit revenue
                     totalTransactions: salesReport.reduce((sum, item) => sum + item.totalTransactions, 0),
                     totalItems: salesReport.reduce((sum, item) => sum + item.totalItems, 0)
                 }
