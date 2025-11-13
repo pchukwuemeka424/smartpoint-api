@@ -23,10 +23,12 @@ router.get('/', auth, async (req, res) => {
             sortBy = 'saleDate', 
             sortOrder = 'desc',
             status,
+            paymentStatus, // Accept paymentStatus as alternative to status
             startDate,
             endDate,
             search,
-            cashierId // New parameter for filtering by specific cashier
+            cashierId, // New parameter for filtering by specific cashier
+            customerId // Filter by customer ID
         } = req.query;
         
         // Build query based on user role
@@ -43,9 +45,15 @@ router.get('/', auth, async (req, res) => {
             query = { userId: req.user.id };
         }
         
-        // Add status filter
-        if (status && status !== 'all') {
-            query.paymentStatus = status;
+        // Add status filter (accept both 'status' and 'paymentStatus' for flexibility)
+        const paymentStatusFilter = status || paymentStatus;
+        if (paymentStatusFilter && paymentStatusFilter !== 'all') {
+            query.paymentStatus = paymentStatusFilter;
+        }
+        
+        // Add customer filter
+        if (customerId) {
+            query.customerId = new mongoose.Types.ObjectId(customerId);
         }
         
         // Add date range filter
@@ -119,10 +127,12 @@ router.get('/cashiers', auth, async (req, res) => {
             sortBy = 'saleDate', 
             sortOrder = 'desc',
             status,
+            paymentStatus, // Accept paymentStatus as alternative to status
             startDate,
             endDate,
             search,
-            cashierId
+            cashierId,
+            customerId // Filter by customer ID
         } = req.query;
         
         // Build query for all cashier transactions under this manager
@@ -136,9 +146,15 @@ router.get('/cashiers', auth, async (req, res) => {
             query.cashierId = new mongoose.Types.ObjectId(cashierId);
         }
         
-        // Add status filter
-        if (status && status !== 'all') {
-            query.paymentStatus = status;
+        // Add status filter (accept both 'status' and 'paymentStatus' for flexibility)
+        const paymentStatusFilter = status || paymentStatus;
+        if (paymentStatusFilter && paymentStatusFilter !== 'all') {
+            query.paymentStatus = paymentStatusFilter;
+        }
+        
+        // Add customer filter
+        if (customerId) {
+            query.customerId = new mongoose.Types.ObjectId(customerId);
         }
         
         // Add date range filter
@@ -412,6 +428,7 @@ router.post('/checkout', auth, async (req, res) => {
             customerName,
             customerPhone,
             customerEmail,
+            customerId, // Customer ID for linking to customer record
             notes,
             deviceId
         } = req.body;
@@ -533,6 +550,17 @@ router.post('/checkout', auth, async (req, res) => {
             paymentStatus = 'pending';
         }
 
+        // Validate customerId if provided
+        let finalCustomerId = null;
+        if (customerId) {
+            if (!mongoose.Types.ObjectId.isValid(customerId)) {
+                return res.status(400).json({
+                    message: 'Invalid customer ID format'
+                });
+            }
+            finalCustomerId = new mongoose.Types.ObjectId(customerId);
+        }
+
         // Create sale record
         const sale = new Sale({
             receiptNumber: receiptNumber || generateReceiptNumber(),
@@ -548,6 +576,7 @@ router.post('/checkout', auth, async (req, res) => {
             customerName: customerName?.trim(),
             customerPhone: customerPhone?.trim(),
             customerEmail: customerEmail?.trim(),
+            customerId: finalCustomerId, // Link to customer record
             notes: notes?.trim(),
             userId: req.user.id,
             managerId,
